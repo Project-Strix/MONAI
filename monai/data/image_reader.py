@@ -1395,3 +1395,44 @@ class NrrdReader(ImageReader):
         header["space origin"] = header["space origin"][::-1]
         header["sizes"] = header["sizes"][::-1]
         return header
+
+
+class NumpyLazyReader(ImageReader):
+    def __init__(self) -> None:
+        raise NotImplementedError()
+
+@require_pkg(pkg_name="nibabel")
+class NibabelLazyReader(NibabelReader):
+    def get_data(self, img, roi_slices: Sequence[slice]) -> tuple[np.ndarray, dict]:
+        img_array: list[np.ndarray] = []
+        compatible_meta: dict = {}
+
+        for im in ensure_tuple(img):
+            header = self._get_meta_dict(im)
+            header[MetaKeys.AFFINE] = self._get_affine(im)
+            header[MetaKeys.ORIGINAL_AFFINE] = self._get_affine(im)
+            header["as_closest_canonical"] = self.as_closest_canonical
+            if self.as_closest_canonical:
+                im = nib.as_closest_canonical(im)
+                header[MetaKeys.AFFINE] = self._get_affine(im)
+            header[MetaKeys.SPATIAL_SHAPE] = self._get_spatial_shape(im)
+            header[MetaKeys.SPACE] = SpaceKeys.RAS
+            data = self._get_array_data(im, roi_slices)
+            if self.squeeze_non_spatial_dims:
+                for d in range(len(data.shape), len(header[MetaKeys.SPATIAL_SHAPE]), -1):
+                    if data.shape[d - 1] == 1:
+                        data = data.squeeze(axis=d - 1)
+            img_array.append(data)
+            if self.channel_dim is None:  # default to "no_channel" or -1
+                header[MetaKeys.ORIGINAL_CHANNEL_DIM] = (
+                    float("nan") if len(data.shape) == len(header[MetaKeys.SPATIAL_SHAPE]) else -1
+                )
+            else:
+                header[MetaKeys.ORIGINAL_CHANNEL_DIM] = self.channel_dim
+            _copy_compatible_dict(header, compatible_meta)
+        
+        return _stack_images(img_array, compatible_meta), compatible_meta
+    
+    def _get_array_data(self, img, roi_slices):
+        proxy_data = img.dataobj
+        return proxy_data[tuple(roi_slices)]

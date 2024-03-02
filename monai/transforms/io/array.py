@@ -22,7 +22,7 @@ import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from pydoc import locate
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -38,6 +38,8 @@ from monai.data.image_reader import (
     NumpyReader,
     PILReader,
     PydicomReader,
+    NibabelLazyReader,
+    NumpyLazyReader,
 )
 from monai.data.meta_tensor import MetaTensor
 from monai.data.utils import is_no_channel
@@ -514,3 +516,144 @@ class SaveImage(Transform):
             "    https://docs.monai.io/en/latest/installation.html#installing-the-recommended-dependencies.\n"
             f"   The current registered writers for {self.output_ext}: {self.writers}.\n{msg}"
         )
+
+
+class LazylLoadImage(Transform):
+    def __init__(
+        self,
+        reader=None,
+        image_only: bool = True,
+        dtype: DtypeLike | None = np.float32,
+        ensure_channel_first: bool = False,
+        simple_keys: bool = False,
+        prune_meta_pattern: str | None = None,
+        prune_meta_sep: str = ".",
+        expanduser: bool = True,
+        *args,
+        **kwargs,
+    ) -> None:
+        
+        self.auto_select = reader is None
+        self.image_only = image_only
+        self.dtype = dtype
+        self.ensure_channel_first = ensure_channel_first
+        self.simple_keys = simple_keys
+        self.pattern = prune_meta_pattern
+        self.sep = prune_meta_sep
+        self.expanduser = expanduser
+
+        _SUPPORTED_READERS = {
+            # "numpyreader": NumpyLazyReader,
+            "nibabelreader": NibabelLazyReader,
+        }
+
+        self.readers: list[ImageReader] = []
+        for r in _SUPPORTED_READERS:  # set predefined readers as default
+            try:
+                self.register(_SUPPORTED_READERS[r](*args, **kwargs))
+            except OptionalImportError:
+                logging.getLogger(self.__class__.__name__).debug(
+                    f"required package for reader {r} is not installed, or the version doesn't match requirement."
+                )
+            except TypeError:  # the reader doesn't have the corresponding args/kwargs
+                logging.getLogger(self.__class__.__name__).debug(
+                    f"{r} is not supported with the given parameters {args} {kwargs}."
+                )
+                self.register(_SUPPORTED_READERS[r]())
+        if reader is None:
+            return  # no user-specified reader, no need to register
+
+        for _r in ensure_tuple(reader):
+            if isinstance(_r, str):
+                the_reader, has_built_in = optional_import("monai.data", name=f"{_r}")  # search built-in
+                if not has_built_in:
+                    the_reader = locate(f"{_r}")  # search dotted path
+                if the_reader is None:
+                    the_reader = look_up_option(_r.lower(), _SUPPORTED_READERS)
+                try:
+                    self.register(the_reader(*args, **kwargs))
+                except OptionalImportError:
+                    warnings.warn(
+                        f"required package for reader {_r} is not installed, or the version doesn't match requirement."
+                    )
+                except TypeError:  # the reader doesn't have the corresponding args/kwargs
+                    warnings.warn(f"{_r} is not supported with the given parameters {args} {kwargs}.")
+                    self.register(the_reader())
+            elif inspect.isclass(_r):
+                self.register(_r(*args, **kwargs))
+            else:
+                self.register(_r)  # reader instance, ignoring the constructor args/kwargs
+        return
+    
+    def register(self, reader: ImageReader):
+        """
+        Register image reader to load image file and metadata.
+
+        Args:
+            reader: reader instance to be registered with this loader.
+
+        """
+        if not isinstance(reader, ImageReader):
+            warnings.warn(f"Preferably the reader should inherit ImageReader, but got {type(reader)}.")
+        print("Registered:", reader)
+        self.readers.append(reader)
+
+    def __call__(self, filename: Sequence[PathLike] | PathLike, roi_slices: Sequence[slice], reader: ImageReader | None = None):
+        if not all(s.step is None or s.step == 1 for s in roi_slices):
+            raise ValueError(f"only slice steps of 1/None are currently supported, got {roi_slices}.")
+
+        filename = tuple(
+            f"{Path(s).expanduser()}" if self.expanduser else s for s in ensure_tuple(filename)  # allow Path objects
+        )
+
+        img, err = None, []
+        if reader is not None:
+            img = reader.read(filename)  # runtime specified reader
+        else:
+            for reader in self.readers[::-1]:
+                if self.auto_select:  # rely on the filename extension to choose the reader
+                    if reader.verify_suffix(filename):
+                        img = reader.read(filename)
+                        break
+                else:  # try the user designated readers
+                    try:
+                        img = reader.read(filename)
+                    except Exception as e:
+                        err.append(traceback.format_exc())
+                        logging.getLogger(self.__class__.__name__).debug(e, exc_info=True)
+                        logging.getLogger(self.__class__.__name__).info(
+                            f"{reader.__class__.__name__}: unable to load {filename}.\n"
+                        )
+                    else:
+                        err = []
+                        break
+
+        if img is None or reader is None:
+            if isinstance(filename, Sequence) and len(filename) == 1:
+                filename = filename[0]
+            msg = "\n".join([f"{e}" for e in err])
+            raise RuntimeError(
+                f"{self.__class__.__name__} cannot find a suitable reader for file: {filename}.\n"
+                "    Please install the reader libraries, see also the installation instructions:\n"
+                "    https://docs.monai.io/en/latest/installation.html#installing-the-recommended-dependencies.\n"
+                f"   The current registered: {self.readers}.\n{msg}"
+            )
+
+        img_array: NdarrayOrTensor
+        img_array, meta_data = reader.get_data(img, ensure_tuple(roi_slices))
+        img_array = convert_to_dst_type(img_array, dst=img_array, dtype=self.dtype)[0]
+        if not isinstance(meta_data, dict):
+            raise ValueError(f"`meta_data` must be a dict, got type {type(meta_data)}.")
+        # make sure all elements in metadata are little endian
+        meta_data = switch_endianness(meta_data, "<")
+
+        meta_data[Key.FILENAME_OR_OBJ] = f"{ensure_tuple(filename)[0]}"  # Path obj should be strings for data loader
+        img = MetaTensor.ensure_torch_and_prune_meta(
+            img_array, meta_data, self.simple_keys, pattern=self.pattern, sep=self.sep
+        )
+        if self.ensure_channel_first:
+            img = EnsureChannelFirst()(img)
+        if self.image_only:
+            return img
+        return img, img.meta if isinstance(img, MetaTensor) else meta_data
+    
