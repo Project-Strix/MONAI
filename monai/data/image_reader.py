@@ -1409,6 +1409,12 @@ class NibabelLazyReader(NibabelReader):
 
         for im in ensure_tuple(img):
             header = self._get_meta_dict(im)
+            if len(roi_slices) != len(im.shape):
+                channel_dim  = -1 if self.channel_dim is None and len(im.shape) != len(header[MetaKeys.SPATIAL_SHAPE]) else self.channel_dim
+                roi_slices_ = list(roi_slices)
+                roi_slices_.insert(channel_dim, slice(None))
+                roi_slices = tuple(roi_slices_ + [Ellipsis])
+
             header[MetaKeys.AFFINE] = self._get_affine(im)
             header[MetaKeys.ORIGINAL_AFFINE] = self._get_affine(im)
             header["as_closest_canonical"] = self.as_closest_canonical

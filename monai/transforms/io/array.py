@@ -595,10 +595,12 @@ class LazylLoadImage(Transform):
         """
         if not isinstance(reader, ImageReader):
             warnings.warn(f"Preferably the reader should inherit ImageReader, but got {type(reader)}.")
-        print("Registered:", reader)
         self.readers.append(reader)
 
     def __call__(self, filename: Sequence[PathLike] | PathLike, roi_slices: Sequence[slice], reader: ImageReader | None = None):
+        if not isinstance(roi_slices[0], slice):
+            raise TypeError(f"roi_slices need to be `Sequence[slice]` type, but got {type(roi_slices)}")
+
         if not all(s.step is None or s.step == 1 for s in roi_slices):
             raise ValueError(f"only slice steps of 1/None are currently supported, got {roi_slices}.")
 
