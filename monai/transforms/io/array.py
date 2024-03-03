@@ -667,7 +667,7 @@ class LazyLoadImage(Transform):
         return image, image.meta if isinstance(image, MetaTensor) else meta_data
     
 
-class RandLazyLoadIamge(Randomizable, LazyLoadImage):
+class RandLazyLoadImage(Randomizable, LazyLoadImage):
     def __init__(
         self, 
         roi_size: Sequence[int] | int,
