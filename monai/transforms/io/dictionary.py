@@ -26,7 +26,7 @@ import monai
 from monai.config import DtypeLike, KeysCollection
 from monai.data import image_writer
 from monai.data.image_reader import ImageReader
-from monai.transforms.io.array import LoadImage, SaveImage, LazylLoadImage
+from monai.transforms.io.array import LoadImage, SaveImage, LazyLoadImage
 from monai.transforms.transform import MapTransform, Transform
 from monai.utils import GridSamplePadMode, ensure_tuple, ensure_tuple_rep
 from monai.utils.enums import PostFix
@@ -342,7 +342,7 @@ class LazyLoadImaged(MapTransform):
     ) -> None:
         super().__init__(keys, allow_missing_keys)
         self.roi_key = roi_key
-        self._loader = LazylLoadImage(
+        self._loader = LazyLoadImage(
             reader,
             image_only,
             dtype,

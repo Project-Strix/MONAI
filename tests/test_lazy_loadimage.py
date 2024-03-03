@@ -27,7 +27,7 @@ from monai.apps import download_and_extract
 from monai.data import NibabelLazyReader
 from monai.data.meta_obj import set_track_meta
 from monai.data.meta_tensor import MetaTensor
-from monai.transforms import LazylLoadImage
+from monai.transforms import LazyLoadImage
 from tests.utils import assert_allclose, skip_if_downloading_fails, testing_data_config
 
 
@@ -82,7 +82,7 @@ class TestLoadImage(unittest.TestCase):
             for i, name in enumerate(filenames):
                 filenames[i] = os.path.join(tempdir, name)
                 nib.save(nib.Nifti1Image(test_image, np.eye(4)), filenames[i])
-            result = LazylLoadImage(image_only=True, **input_param)(filenames, roi_slices)
+            result = LazyLoadImage(image_only=True, **input_param)(filenames, roi_slices)
             ext = "".join(Path(name).suffixes)
             self.assertEqual(result.meta["filename_or_obj"], os.path.join(tempdir, "test_image" + ext))
             self.assertEqual(result.meta["space"], "RAS")
@@ -96,7 +96,7 @@ class TestLoadImage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             filename = os.path.join(tempdir, filename)
             nib.save(nib.Nifti1Image(test_image, np.eye(4)), filename)
-            result = LazylLoadImage(image_only=True, **input_param)(filename, roi_slices)
+            result = LazyLoadImage(image_only=True, **input_param)(filename, roi_slices)
 
         self.assertTupleEqual(
             result.shape, (3, 5, 5, 5) if input_param.get("ensure_channel_first", False) else expected_shape
@@ -122,7 +122,7 @@ class TestLoadImageMeta(unittest.TestCase):
     @parameterized.expand(TESTS_META)
     def test_correct(self, input_param, expected_shape, track_meta):
         set_track_meta(track_meta)
-        r = LazylLoadImage(image_only=True, prune_meta_pattern="glmax", prune_meta_sep="%", **input_param)(self.test_data, [slice(0,5), slice(0,5), slice(0,5)])
+        r = LazyLoadImage(image_only=True, prune_meta_pattern="glmax", prune_meta_sep="%", **input_param)(self.test_data, [slice(0,5), slice(0,5), slice(0,5)])
         self.assertTupleEqual(r.shape, expected_shape)
         if track_meta:
             self.assertIsInstance(r, MetaTensor)

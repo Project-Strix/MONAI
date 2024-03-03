@@ -234,7 +234,7 @@ from .intensity.dictionary import (
 )
 from .inverse import InvertibleTransform, TraceableTransform
 from .inverse_batch_transform import BatchInverseTransform, Decollated, DecollateD, DecollateDict
-from .io.array import SUPPORTED_READERS, LoadImage, SaveImage, LazylLoadImage, RandLazyLoadIamge
+from .io.array import SUPPORTED_READERS, LoadImage, SaveImage, LazyLoadImage, RandLazyLoadIamge
 from .io.dictionary import LoadImaged, LoadImageD, LoadImageDict, SaveImaged, SaveImageD, SaveImageDict, LazyLoadImaged, LazyLoadImageD, LazyLoadImageDict
 from .lazy.array import ApplyPending
 from .lazy.dictionary import ApplyPendingd, ApplyPendingD, ApplyPendingDict
