@@ -42,12 +42,12 @@ from monai.data.image_reader import (
     NumpyLazyReader,
 )
 from monai.data.meta_tensor import MetaTensor
-from monai.data.utils import is_no_channel
-from monai.transforms.transform import Transform
+from monai.data.utils import is_no_channel, get_random_patch, get_valid_patch_size
+from monai.transforms.transform import Transform, Randomizable
 from monai.transforms.utility.array import EnsureChannelFirst
 from monai.utils import GridSamplePadMode
-from monai.utils import ImageMetaKey as Key
-from monai.utils import OptionalImportError, convert_to_dst_type, ensure_tuple, look_up_option, optional_import
+from monai.utils import ImageMetaKey as Key, MetaKeys
+from monai.utils import OptionalImportError, convert_to_dst_type, ensure_tuple, look_up_option, optional_import, fall_back_tuple
 
 nib, _ = optional_import("nibabel")
 Image, _ = optional_import("PIL.Image")
@@ -597,20 +597,123 @@ class LazylLoadImage(Transform):
             warnings.warn(f"Preferably the reader should inherit ImageReader, but got {type(reader)}.")
         self.readers.append(reader)
 
-    def __call__(self, filename: Sequence[PathLike] | PathLike, roi_slices: Sequence[slice], reader: ImageReader | None = None):
+    def __call__(
+        self, 
+        filename: Sequence[PathLike] | PathLike, 
+        roi_slices: Sequence[slice], 
+        reader: ImageReader | None = None,
+        image: Any | None = None,
+    ):
         if not isinstance(roi_slices[0], slice):
             raise TypeError(f"roi_slices need to be `Sequence[slice]` type, but got {type(roi_slices)}")
 
         if not all(s.step is None or s.step == 1 for s in roi_slices):
             raise ValueError(f"only slice steps of 1/None are currently supported, got {roi_slices}.")
 
+        if image is None:
+            filename = tuple(
+                f"{Path(s).expanduser()}" if self.expanduser else s for s in ensure_tuple(filename)  # allow Path objects
+            )
+
+            err = []
+            if reader is not None:
+                image = reader.read(filename)  # runtime specified reader
+            else:
+                for reader in self.readers[::-1]:
+                    if self.auto_select:  # rely on the filename extension to choose the reader
+                        if reader.verify_suffix(filename):
+                            image = reader.read(filename)
+                            break
+                    else:  # try the user designated readers
+                        try:
+                            image = reader.read(filename)
+                        except Exception as e:
+                            err.append(traceback.format_exc())
+                            logging.getLogger(self.__class__.__name__).debug(e, exc_info=True)
+                            logging.getLogger(self.__class__.__name__).info(
+                                f"{reader.__class__.__name__}: unable to load {filename}.\n"
+                            )
+                        else:
+                            err = []
+                            break
+
+            if image is None or reader is None:
+                if isinstance(filename, Sequence) and len(filename) == 1:
+                    filename = filename[0]
+                msg = "\n".join([f"{e}" for e in err])
+                raise RuntimeError(
+                    f"{self.__class__.__name__} cannot find a suitable reader for file: {filename}.\n"
+                    "    Please install the reader libraries, see also the installation instructions:\n"
+                    "    https://docs.monai.io/en/latest/installation.html#installing-the-recommended-dependencies.\n"
+                    f"   The current registered: {self.readers}.\n{msg}"
+                )
+
+        img_array: NdarrayOrTensor
+        img_array, meta_data = reader.get_data(image, ensure_tuple(roi_slices))
+        img_array = convert_to_dst_type(img_array, dst=img_array, dtype=self.dtype)[0]
+        if not isinstance(meta_data, dict):
+            raise ValueError(f"`meta_data` must be a dict, got type {type(meta_data)}.")
+        # make sure all elements in metadata are little endian
+        meta_data = switch_endianness(meta_data, "<")
+
+        meta_data[Key.FILENAME_OR_OBJ] = f"{ensure_tuple(filename)[0]}"  # Path obj should be strings for data loader
+        image = MetaTensor.ensure_torch_and_prune_meta(
+            img_array, meta_data, self.simple_keys, pattern=self.pattern, sep=self.sep
+        )
+        if self.ensure_channel_first:
+            image = EnsureChannelFirst()(image)
+        if self.image_only:
+            return image
+        return image, image.meta if isinstance(image, MetaTensor) else meta_data
+    
+
+class RandLazyLoadIamge(Randomizable, LazylLoadImage):
+    def __init__(
+        self, 
+        roi_size: Sequence[int] | int,
+        reader=None,
+        image_only: bool = True, 
+        dtype: DtypeLike = np.float32, 
+        ensure_channel_first: bool = False, 
+        simple_keys: bool = False, 
+        prune_meta_pattern: str | None = None, 
+        prune_meta_sep: str = ".", 
+        expanduser: bool = True, 
+        *args, 
+        **kwargs
+    ) -> None:
+        super().__init__(
+            reader, 
+            image_only, 
+            dtype, 
+            ensure_channel_first, 
+            simple_keys, 
+            prune_meta_pattern, 
+            prune_meta_sep, 
+            expanduser, 
+            *args, 
+            **kwargs
+        )
+        self.roi_size = roi_size
+    
+    def randomize(self, img_size: Sequence[int]) -> None:
+        self._size = fall_back_tuple(self.roi_size, img_size)
+        valid_size = get_valid_patch_size(img_size, self._size)
+        self._slices = get_random_patch(img_size, valid_size, self.R)
+
+    def __call__(
+        self, 
+        filename: Sequence[PathLike] | PathLike,
+        randomize: bool = True,
+        reader: ImageReader | None = None
+    ):
         filename = tuple(
-            f"{Path(s).expanduser()}" if self.expanduser else s for s in ensure_tuple(filename)  # allow Path objects
+            f"{Path(s).expanduser()}" if self.expanduser else s for s in ensure_tuple(filename)
         )
 
         img, err = None, []
         if reader is not None:
-            img = reader.read(filename)  # runtime specified reader
+            img = reader.read(filename)
         else:
             for reader in self.readers[::-1]:
                 if self.auto_select:  # rely on the filename extension to choose the reader
@@ -640,22 +743,14 @@ class LazylLoadImage(Transform):
                 "    https://docs.monai.io/en/latest/installation.html#installing-the-recommended-dependencies.\n"
                 f"   The current registered: {self.readers}.\n{msg}"
             )
+        
+        img_size = reader._get_spatial_shape(img[0] if isinstance(img, Sequence) else img) 
+        if randomize:
+            self.randomize(img_size)
+        if self._slices is None:
+            raise RuntimeError("self._slices not specified.")
+        
+        return super().__call__(filename, self._slices, reader=reader, image=img)
+        
 
-        img_array: NdarrayOrTensor
-        img_array, meta_data = reader.get_data(img, ensure_tuple(roi_slices))
-        img_array = convert_to_dst_type(img_array, dst=img_array, dtype=self.dtype)[0]
-        if not isinstance(meta_data, dict):
-            raise ValueError(f"`meta_data` must be a dict, got type {type(meta_data)}.")
-        # make sure all elements in metadata are little endian
-        meta_data = switch_endianness(meta_data, "<")
-
-        meta_data[Key.FILENAME_OR_OBJ] = f"{ensure_tuple(filename)[0]}"  # Path obj should be strings for data loader
-        img = MetaTensor.ensure_torch_and_prune_meta(
-            img_array, meta_data, self.simple_keys, pattern=self.pattern, sep=self.sep
-        )
-        if self.ensure_channel_first:
-            img = EnsureChannelFirst()(img)
-        if self.image_only:
-            return img
-        return img, img.meta if isinstance(img, MetaTensor) else meta_data
-    
+        
