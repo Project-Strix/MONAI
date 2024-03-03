@@ -26,8 +26,9 @@ import monai
 from monai.config import DtypeLike, KeysCollection
 from monai.data import image_writer
 from monai.data.image_reader import ImageReader
-from monai.transforms.io.array import LoadImage, SaveImage, LazyLoadImage
-from monai.transforms.transform import MapTransform, Transform
+from monai.data.meta_tensor import MetaTensor
+from monai.transforms.io.array import LoadImage, SaveImage, LazyLoadImage, RandLazyLoadImage
+from monai.transforms.transform import MapTransform, Transform, Randomizable
 from monai.utils import GridSamplePadMode, ensure_tuple, ensure_tuple_rep
 from monai.utils.enums import PostFix
 
@@ -393,6 +394,88 @@ class LazyLoadImaged(MapTransform):
         return d
     
 
+class RandLazyLoadImaged(MapTransform, Randomizable):
+    def __init__(
+        self,
+        keys: KeysCollection,
+        roi_size: Sequence[int] | int,
+        reader: type[ImageReader] | str | None = None,
+        dtype: DtypeLike = np.float32,
+        meta_keys: KeysCollection | None = None,
+        meta_key_postfix: str = DEFAULT_POST_FIX,
+        overwriting: bool = False,
+        image_only: bool = True,
+        ensure_channel_first: bool = False,
+        simple_keys: bool = False,
+        prune_meta_pattern: str | None = None,
+        prune_meta_sep: str = ".",
+        allow_missing_keys: bool = False,
+        expanduser: bool = True,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(keys, allow_missing_keys)
+        self._loader = RandLazyLoadImage(
+            roi_size,
+            reader,
+            image_only,
+            dtype,
+            ensure_channel_first,
+            simple_keys,
+            prune_meta_pattern,
+            prune_meta_sep,
+            expanduser,
+            *args,
+            **kwargs,
+        )
+        if not isinstance(meta_key_postfix, str):
+            raise TypeError(f"meta_key_postfix must be a str but is {type(meta_key_postfix).__name__}.")
+        self.meta_keys = ensure_tuple_rep(None, len(self.keys)) if meta_keys is None else ensure_tuple(meta_keys)
+        if len(self.keys) != len(self.meta_keys):
+            raise ValueError(
+                f"meta_keys should have the same length as keys, got {len(self.keys)} and {len(self.meta_keys)}."
+            )
+        self.meta_key_postfix = ensure_tuple_rep(meta_key_postfix, len(self.keys))
+        self.overwriting = overwriting
+    
+    def register(self, reader: ImageReader):
+        self._loader.register(reader)
+
+    def set_random_state(self, seed: int | None = None, state: np.random.RandomState | None = None) -> RandLazyLoadImaged:
+        super().set_random_state(seed, state)
+        if isinstance(self._loader, Randomizable):
+            self._loader.set_random_state(seed, state)
+        return self
+
+    def randomize(self, img_size: Sequence[int]) -> None:
+        if isinstance(self._loader, Randomizable):
+            self._loader.randomize(img_size) 
+    
+    def __call__(self, data, reader: ImageReader | None = None):
+        d = dict(data)
+        first_item = d[self.first_key(d)]
+        first_img, first_reader = self._loader._get_image(first_item)
+        img_size = first_reader._get_spatial_shape(first_img[0] if isinstance(first_img, Sequence) else first_img) 
+        self.randomize(img_size)
+        for key, meta_key, meta_key_postfix in self.key_iterator(d, self.meta_keys, self.meta_key_postfix):
+            data = self._loader(d[key], randomize=False, reader=reader)
+            if self._loader.image_only:
+                d[key] = data
+            else:
+                if not isinstance(data, (tuple, list)):
+                    raise ValueError(
+                        f"loader must return a tuple or list (because image_only=False was used), got {type(data)}."
+                    )
+                d[key] = data[0]
+                if not isinstance(data[1], dict):
+                    raise ValueError(f"metadata must be a dict, got {type(data[1])}.")
+                meta_key = meta_key or f"{key}_{meta_key_postfix}"
+                if meta_key in d and not self.overwriting:
+                    raise KeyError(f"Metadata with key {meta_key} already exists and overwriting=False.")
+                d[meta_key] = data[1]
+        return d
+
 LoadImageD = LoadImageDict = LoadImaged
 SaveImageD = SaveImageDict = SaveImaged
 LazyLoadImageD = LazyLoadImageDict = LazyLoadImaged
+RandLazyLoadImageD = RandLazyLoadImageDict = RandLazyLoadImaged

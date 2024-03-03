@@ -701,12 +701,7 @@ class RandLazyLoadImage(Randomizable, LazyLoadImage):
         valid_size = get_valid_patch_size(img_size, self._size)
         self._slices = get_random_patch(img_size, valid_size, self.R)
 
-    def __call__(
-        self, 
-        filename: Sequence[PathLike] | PathLike,
-        randomize: bool = True,
-        reader: ImageReader | None = None
-    ):
+    def _get_image(self, filename: Sequence[PathLike] | PathLike, reader: ImageReader | None = None):
         filename = tuple(
             f"{Path(s).expanduser()}" if self.expanduser else s for s in ensure_tuple(filename)
         )
@@ -743,7 +738,16 @@ class RandLazyLoadImage(Randomizable, LazyLoadImage):
                 "    https://docs.monai.io/en/latest/installation.html#installing-the-recommended-dependencies.\n"
                 f"   The current registered: {self.readers}.\n{msg}"
             )
+        return img, reader
+
+    def __call__(
+        self, 
+        filename: Sequence[PathLike] | PathLike,
+        randomize: bool = True,
+        reader: ImageReader | None = None
+    ):
         
+        img, reader = self._get_image(filename)
         img_size = reader._get_spatial_shape(img[0] if isinstance(img, Sequence) else img) 
         if randomize:
             self.randomize(img_size)
